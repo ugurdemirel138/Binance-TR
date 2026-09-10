@@ -527,7 +527,16 @@ class SmartTrader:
         pos = self.positions.get(symbol)
         if not pos:
             return
-        qty_str = format_amount(pos["qty"], pos["filters"]["step"])
+        base_asset = symbol.split("_")[0]
+        balances = get_account_balances(self.client)
+        actual_qty = balances.get(base_asset, 0)
+        qty_to_sell = min(pos["qty"], actual_qty) if actual_qty > 0 else pos["qty"]
+        qty_to_sell = round_step(qty_to_sell, pos["filters"]["step"])
+        if qty_to_sell <= 0:
+            self.log(f"{symbol}: satılacak bakiye bulunamadı, pozisyon kaydı temizlendi.")
+            del self.positions[symbol]
+            return
+        qty_str = format_amount(qty_to_sell, pos["filters"]["step"])
         try:
             self.client.signed_request(
                 "POST", "/open/v1/orders",
@@ -537,7 +546,7 @@ class SmartTrader:
             info = fetch_ticker_ws(symbol.replace("_", ""), timeout=4)
             if info.get("price"):
                 sell_price = info["price"]
-            profit = (sell_price - pos["entry_price"]) * pos["qty"]
+            profit = (sell_price - pos["entry_price"]) * qty_to_sell
             self.realized_profit += profit
             self.trade_history.append({
                 "symbol": symbol, "profit": profit,
@@ -554,7 +563,7 @@ class SmartTrader:
         except Exception as e:
             self.log(f"HATA (satım {symbol}): {e}")
         finally:
-            del self.positions[symbol]
+            self.positions.pop(symbol, None)
 
     def _adapt(self):
         """Son işlemlere bakıp eşikleri hafifçe ayarlar (basit, şeffaf kural)."""

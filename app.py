@@ -83,6 +83,63 @@ def format_amount(value: float, step: float) -> str:
     return f"{value:.{decimals}f}"
 
 
+# Otomatik modda denenecek adaylar (likit TRY pariteleri, en başta en çok işlem göreni)
+AUTO_CANDIDATE_SYMBOLS = [
+    "BTC_TRY", "ETH_TRY", "BNB_TRY", "XRP_TRY", "SOL_TRY",
+    "DOGE_TRY", "ADA_TRY", "AVAX_TRY", "TRX_TRY", "DOT_TRY",
+]
+
+
+def fetch_ticker_ws(symbol_flat: str, timeout: float = 8) -> dict:
+    """miniTicker akışından güncel fiyat + 24 saatlik en yüksek/en düşük fiyatı alır."""
+    result = {}
+    done = threading.Event()
+    stream_symbol = symbol_flat.lower()
+
+    bases = [
+        f"wss://stream-cloud.binance.tr/ws/{stream_symbol}@miniTicker",
+        f"wss://stream-tr.2meta.app/ws/{stream_symbol}@miniTicker",
+    ]
+
+    for url in bases:
+        result.clear()
+        done.clear()
+
+        def on_message(ws, message):
+            try:
+                data = json.loads(message)
+                if data.get("c") is not None:
+                    result["price"] = float(data["c"])
+                    result["high"] = float(data.get("h", data["c"]))
+                    result["low"] = float(data.get("l", data["c"]))
+            except Exception:
+                pass
+            done.set()
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+        def on_error(ws, error):
+            done.set()
+
+        ws_app = websocket.WebSocketApp(url, on_message=on_message, on_error=on_error)
+        run_kwargs = {}
+        if PROXY:
+            run_kwargs = {
+                "http_proxy_host": PROXY["host"],
+                "http_proxy_port": PROXY["port"],
+                "http_proxy_auth": (PROXY["user"], PROXY["password"]),
+                "proxy_type": "http",
+            }
+        t = threading.Thread(target=ws_app.run_forever, kwargs=run_kwargs, daemon=True)
+        t.start()
+        done.wait(timeout)
+        if "price" in result:
+            return result
+    return {}
+
+
 class BinanceTRClient:
     """Binance TR API için imzalı/imzasız istek yardımcı sınıfı."""
 
@@ -469,7 +526,8 @@ class GridBot:
             }
 
 
-bot = GridBot()
+bots = {}          # symbol -> GridBot
+bots_lock = threading.Lock()
 
 
 @app.route("/")
@@ -479,10 +537,18 @@ def index():
 
 @app.route("/api/start", methods=["POST"])
 def api_start():
+    """Manuel mod: tek bir sembol için, kullanıcının verdiği aralıkla başlatır."""
     data = request.get_json(force=True)
+    symbol = data["symbol"].upper().strip()
+    with bots_lock:
+        existing = bots.get(symbol)
+        if existing and existing.active:
+            return jsonify({"ok": False, "error": f"{symbol} için zaten çalışan bir bot var."}), 400
+        new_bot = GridBot()
+        bots[symbol] = new_bot
     try:
-        bot.start(
-            symbol=data["symbol"],
+        new_bot.start(
+            symbol=symbol,
             lower=float(data["lower"]),
             upper=float(data["upper"]),
             grid_count=int(data["grid_count"]),
@@ -493,15 +559,77 @@ def api_start():
         return jsonify({"ok": False, "error": str(e)}), 400
 
 
+@app.route("/api/auto_start", methods=["POST"])
+def api_auto_start():
+    """Otomatik mod: bot, coin ve fiyat aralığını kendisi seçer."""
+    data = request.get_json(force=True)
+    total_investment = float(data["investment"])
+    count = max(1, min(int(data.get("count", 3)), len(AUTO_CANDIDATE_SYMBOLS)))
+    grid_count = int(data.get("grid_count", 10))
+
+    with bots_lock:
+        running = {s for s, b in bots.items() if b.active}
+    candidates = [s for s in AUTO_CANDIDATE_SYMBOLS if s not in running]
+
+    if not candidates:
+        return jsonify({"ok": False, "error": "Şu an başlatılabilecek boşta coin yok."}), 400
+
+    chosen = candidates[:count]
+    per_coin_investment = total_investment / len(chosen)
+
+    started, errors = [], []
+    for symbol in chosen:
+        symbol_flat = symbol.replace("_", "")
+        info = fetch_ticker_ws(symbol_flat)
+        price = info.get("price")
+        if not price:
+            errors.append(f"{symbol}: güncel fiyat alınamadı, atlandı.")
+            continue
+
+        high, low = info.get("high", price), info.get("low", price)
+        width = max(high - low, price * 0.02) if high > low else price * 0.04
+        lower, upper = price - width, price + width
+
+        new_bot = GridBot()
+        with bots_lock:
+            bots[symbol] = new_bot
+        try:
+            new_bot.start(symbol, lower, upper, grid_count, per_coin_investment)
+            started.append(symbol)
+        except Exception as e:
+            errors.append(f"{symbol}: {e}")
+
+    if not started:
+        return jsonify({"ok": False, "error": "Hiçbir coin başlatılamadı.", "details": errors}), 400
+
+    return jsonify({"ok": True, "started": started, "errors": errors})
+
+
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
-    bot.stop()
+    data = request.get_json(force=True) or {}
+    symbol = (data.get("symbol") or "").upper().strip()
+    with bots_lock:
+        target = bots.get(symbol)
+    if target:
+        target.stop()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/stop_all", methods=["POST"])
+def api_stop_all():
+    with bots_lock:
+        items = list(bots.values())
+    for b in items:
+        b.stop()
     return jsonify({"ok": True})
 
 
 @app.route("/api/status")
 def api_status():
-    return jsonify(bot.status())
+    with bots_lock:
+        items = list(bots.items())
+    return jsonify({"bots": [{"symbol": s, **b.status()} for s, b in items]})
 
 
 if __name__ == "__main__":

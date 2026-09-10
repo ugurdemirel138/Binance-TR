@@ -21,7 +21,7 @@ import hashlib
 import json
 import threading
 from datetime import datetime
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import requests
 import websocket
@@ -38,6 +38,27 @@ API_SECRET = os.getenv("BINANCE_TR_API_SECRET", "")
 TRADE_BASE = "https://www.binance.tr"      # imzalı/trading endpoint'leri
 MARKET_BASE = "https://api.binance.me"     # public piyasa verisi
 WS_API_BASE = "wss://ws-api.binance.tr:443/ws-api/v3"  # kullanıcı veri akışı (WebSocket)
+
+# --- QuotaGuard sabit IP proxy desteği ---
+QUOTAGUARD_URL = os.getenv("QUOTAGUARDSTATIC_URL", "")
+
+
+def _parse_proxy():
+    if not QUOTAGUARD_URL:
+        return None
+    url = QUOTAGUARD_URL.split(",")[0].strip()
+    parsed = urlparse(url)
+    return {
+        "url": url,
+        "host": parsed.hostname,
+        "port": parsed.port,
+        "user": parsed.username,
+        "password": parsed.password,
+    }
+
+
+PROXY = _parse_proxy()
+REQUESTS_PROXIES = {"http": PROXY["url"], "https": PROXY["url"]} if PROXY else None
 
 MAX_LOG_LINES = 200
 
@@ -77,16 +98,16 @@ class BinanceTRClient:
         url = f"{TRADE_BASE}{path}"
         headers = {"X-MBX-APIKEY": self.api_key}
         if method == "GET":
-            resp = requests.get(url, params=params, headers=headers, timeout=10)
+            resp = requests.get(url, params=params, headers=headers, timeout=10, proxies=REQUESTS_PROXIES)
         else:
-            resp = requests.post(url, params=params, headers=headers, timeout=10)
+            resp = requests.post(url, params=params, headers=headers, timeout=10, proxies=REQUESTS_PROXIES)
         data = resp.json()
         if data.get("code") not in (0, None):
             raise RuntimeError(data.get("msg", "Bilinmeyen API hatası"))
         return data
 
     def public_request(self, base: str, path: str, params: dict = None):
-        resp = requests.get(f"{base}{path}", params=params or {}, timeout=10)
+        resp = requests.get(f"{base}{path}", params=params or {}, timeout=10, proxies=REQUESTS_PROXIES)
         return resp.json()
 
 
@@ -169,7 +190,14 @@ class GridBot:
                 done.set()
 
             ws_app = websocket.WebSocketApp(url, on_message=on_message, on_error=on_error)
-            t = threading.Thread(target=ws_app.run_forever, daemon=True)
+            run_kwargs = {}
+            if PROXY:
+                run_kwargs = {
+                    "http_proxy_host": PROXY["host"],
+                    "http_proxy_port": PROXY["port"],
+                    "http_proxy_auth": (PROXY["user"], PROXY["password"]),
+                }
+            t = threading.Thread(target=ws_app.run_forever, kwargs=run_kwargs, daemon=True)
             t.start()
             done.wait(timeout)
             if "price" in result:
@@ -350,7 +378,14 @@ class GridBot:
             on_error=on_error,
             on_close=on_close,
         )
-        self.ws.run_forever(ping_interval=180)
+        run_kwargs = {"ping_interval": 180}
+        if PROXY:
+            run_kwargs.update({
+                "http_proxy_host": PROXY["host"],
+                "http_proxy_port": PROXY["port"],
+                "http_proxy_auth": (PROXY["user"], PROXY["password"]),
+            })
+        self.ws.run_forever(**run_kwargs)
 
     def _renew_loop(self):
         # listenToken 24 saatte bir yenilenmeli; her 12 saatte bir yeniden bağlan.

@@ -11,6 +11,8 @@ Bu API, global Binance'tan tamamen ayrıdır:
 Grid mantığı, global Binance versiyonuyla birebir aynı:
 fiyatın altına BUY emirleri açılır, dolunca bir üst seviyeye SELL
 emri konur, o da dolunca kâr kaydedilip tekrar BUY açılır.
+Emirler artık REST sorgusu (polling) yerine WebSocket üzerinden
+anlık olarak izlenir, bu sayede rate-limit riski en aza iner.
 """
 
 import os
@@ -18,11 +20,13 @@ import math
 import time
 import hmac
 import hashlib
+import json
 import threading
 from datetime import datetime
 from urllib.parse import urlencode
 
 import requests
+import websocket
 from flask import Flask, jsonify, request, render_template
 from dotenv import load_dotenv
 
@@ -35,6 +39,7 @@ API_SECRET = os.getenv("BINANCE_TR_API_SECRET", "")
 
 TRADE_BASE = "https://www.binance.tr"      # imzalı/trading endpoint'leri
 MARKET_BASE = "https://api.binance.me"     # public piyasa verisi
+WS_API_BASE = "wss://ws-api.binance.tr:443/ws-api/v3"  # kullanıcı veri akışı (WebSocket)
 
 MAX_LOG_LINES = 200
 
@@ -103,9 +108,14 @@ class GridBot:
         self.step_size = 0.0
 
         self.orders = {}
+        self.order_id_to_level = {}
         self.trades = []
         self.logs = []
         self.error = None
+
+        self.ws = None
+        self.ws_thread = None
+        self.renew_thread = None
 
     def log(self, message: str):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -207,9 +217,11 @@ class GridBot:
                 "için hiç BUY emri açılamadı. Aralığı kontrol edin."
             )
 
-        self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self.thread = threading.Thread(target=self._start_user_stream, daemon=True)
         self.thread.start()
-        self.log("Grid bot başlatıldı.")
+        self.renew_thread = threading.Thread(target=self._renew_loop, daemon=True)
+        self.renew_thread.start()
+        self.log("Grid bot başlatıldı (WebSocket ile izleniyor).")
 
     def _place_order(self, level_idx, side):
         price = self._round_price(self.levels[level_idx])
@@ -235,27 +247,78 @@ class GridBot:
                 "price": price,
                 "qty": qty,
             }
+            self.order_id_to_level[str(order_id)] = level_idx
             self.log(f"{side} emri açıldı: seviye {level_idx} @ {price}")
         except Exception as e:
             self.error = str(e)
             self.log(f"HATA ({side} @ {price}): {e}")
 
-    def _monitor_loop(self):
-        while self.active:
+    def _create_listen_token(self):
+        resp = self.client.signed_request("POST", "/open/v1/user-listen-token", {})
+        return resp["data"]["token"], resp["data"].get("expirationTime")
+
+    def _start_user_stream(self):
+        try:
+            token, _ = self._create_listen_token()
+        except Exception as e:
+            self.log(f"HATA (listen token alınamadı): {e}")
+            return
+
+        def on_open(ws):
+            ws.send(json.dumps({
+                "id": "sub1",
+                "method": "userDataStream.subscribe.listenToken",
+                "params": {"listenToken": token},
+            }))
+            self.log("WebSocket bağlandı, kullanıcı verisine abone olundu.")
+
+        def on_message(ws, message):
             try:
-                for level_idx, info in list(self.orders.items()):
-                    resp = self.client.signed_request(
-                        "GET",
-                        "/open/v1/orders/detail",
-                        {"orderId": info["orderId"]},
-                    )
-                    status = resp["data"]["status"]
-                    if status == STATUS_FILLED:
-                        self._handle_fill(level_idx, info)
-            except Exception as e:
-                self.error = str(e)
-                self.log(f"HATA (izleme): {e}")
-            time.sleep(5)
+                msg = json.loads(message)
+            except Exception:
+                return
+            event = msg.get("event")
+            if not isinstance(event, dict):
+                return
+            e_type = event.get("e")
+            if e_type == "executionReport" and event.get("X") == "FILLED":
+                order_id = str(event.get("i"))
+                level_idx = self.order_id_to_level.get(order_id)
+                if level_idx is not None and level_idx in self.orders:
+                    self._handle_fill(level_idx, self.orders[level_idx])
+            elif e_type == "eventStreamTerminated":
+                self.log("WebSocket oturumu sona erdi, yeniden bağlanılıyor.")
+                if self.active:
+                    threading.Thread(target=self._start_user_stream, daemon=True).start()
+
+        def on_error(ws, error):
+            self.log(f"WebSocket hatası: {error}")
+
+        def on_close(ws, code, reason):
+            self.log("WebSocket bağlantısı kapandı.")
+            if self.active:
+                time.sleep(5)
+                threading.Thread(target=self._start_user_stream, daemon=True).start()
+
+        self.ws = websocket.WebSocketApp(
+            WS_API_BASE,
+            on_open=on_open,
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close,
+        )
+        self.ws.run_forever(ping_interval=180)
+
+    def _renew_loop(self):
+        # listenToken 24 saatte bir yenilenmeli; her 12 saatte bir yeniden bağlan.
+        while self.active:
+            time.sleep(12 * 3600)
+            if self.active and self.ws:
+                self.log("Token yenileniyor, WebSocket yeniden başlatılıyor.")
+                try:
+                    self.ws.close()
+                except Exception:
+                    pass
 
     def _handle_fill(self, level_idx, info):
         del self.orders[level_idx]
@@ -284,6 +347,11 @@ class GridBot:
         if not self.active:
             return
         self.active = False
+        if self.ws:
+            try:
+                self.ws.close()
+            except Exception:
+                pass
         for level_idx, info in list(self.orders.items()):
             try:
                 self.client.signed_request(
@@ -293,6 +361,7 @@ class GridBot:
             except Exception as e:
                 self.log(f"HATA (iptal): {e}")
         self.orders = {}
+        self.order_id_to_level = {}
         self.log("Grid bot durduruldu.")
 
     def status(self):

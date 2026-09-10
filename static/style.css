@@ -192,3 +192,92 @@ td { padding: 6px 4px; border-bottom: 1px solid rgba(255,255,255,0.04); }
   white-space: pre-wrap;
   margin: 0;
 }
+
+.hint-text {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin: 0 0 14px;
+  line-height: 1.5;
+}
+
+.manual-toggle {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--panel-border);
+}
+.manual-toggle summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--accent-neutral);
+  margin-bottom: 12px;
+}
+.manual-toggle form { margin-top: 12px; }
+
+.btn-stop-all {
+  width: 100%;
+  margin-top: 14px;
+  background: transparent;
+  border: 1px solid var(--accent-sell);
+  color: var(--accent-sell);
+  border-radius: 6px;
+  padding: 9px 12px;
+  font-family: var(--sans);
+  font-weight: 600;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.bot-card {
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  background: rgba(255,255,255,0.015);
+}
+
+.bot-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.bot-symbol {
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 14px;
+}
+.bot-profit {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--accent-buy);
+  margin-left: auto;
+}
+.bot-stop-btn {
+  background: transparent;
+  border: 1px solid var(--accent-sell);
+  color: var(--accent-sell);
+  border-radius: 5px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.bot-meta {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+
+.bot-log-mini {
+  background: #0B0F14;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  max-height: 90px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  margin: 0;
+}

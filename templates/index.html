@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Grid Trader</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">▦</span>
+    <span class="brand-name">Grid Trader</span>
+  </div>
+  <div class="env-tag {{ 'env-test' if testnet else 'env-live' }}">
+    {{ 'TESTNET' if testnet else 'GERÇEK HESAP' }}
+  </div>
+</header>
+
+<main class="layout">
+
+  <section class="panel config-panel">
+    <h2>Grid Ayarları</h2>
+    <form id="config-form">
+      <label>
+        Sembol
+        <input type="text" id="symbol" value="BTC_USDT" autocomplete="off">
+      </label>
+      <div class="field-row">
+        <label>
+          Alt sınır
+          <input type="number" id="lower" step="any" placeholder="örn. 58000">
+        </label>
+        <label>
+          Üst sınır
+          <input type="number" id="upper" step="any" placeholder="örn. 64000">
+        </label>
+      </div>
+      <label>
+        Grid sayısı
+        <input type="number" id="grid_count" value="10" min="2" max="100">
+      </label>
+      <label>
+        Toplam yatırım (quote, örn. USDT)
+        <input type="number" id="investment" step="any" placeholder="örn. 200">
+      </label>
+
+      <div class="actions">
+        <button type="submit" id="start-btn" class="btn btn-start">Botu Başlat</button>
+        <button type="button" id="stop-btn" class="btn btn-stop" disabled>Botu Durdur</button>
+      </div>
+      <p class="form-error" id="form-error"></p>
+    </form>
+
+    <div class="pnl-box">
+      <span class="pnl-label">Toplam gerçekleşen kâr</span>
+      <span class="pnl-value" id="pnl-value">0.00</span>
+    </div>
+  </section>
+
+  <section class="panel main-panel">
+    <div class="status-row">
+      <div class="status-dot" id="status-dot"></div>
+      <span id="status-text">Bot durdu</span>
+      <span class="symbol-tag" id="symbol-tag"></span>
+    </div>
+
+    <div class="grid-ladder-wrap">
+      <h3>Grid Seviyeleri</h3>
+      <div class="grid-ladder" id="grid-ladder">
+        <p class="empty-hint">Bot başlatıldığında seviyeler burada görünecek.</p>
+      </div>
+    </div>
+
+    <div class="tables-row">
+      <div class="table-box">
+        <h3>Açık Emirler</h3>
+        <table>
+          <thead><tr><th>Seviye</th><th>Yön</th><th>Fiyat</th><th>Miktar</th></tr></thead>
+          <tbody id="orders-body"></tbody>
+        </table>
+      </div>
+      <div class="table-box">
+        <h3>Tamamlanan İşlemler</h3>
+        <table>
+          <thead><tr><th>Saat</th><th>Al</th><th>Sat</th><th>Kâr</th></tr></thead>
+          <tbody id="trades-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="log-box">
+      <h3>Aktivite Kaydı</h3>
+      <pre id="log-output"></pre>
+    </div>
+  </section>
+
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

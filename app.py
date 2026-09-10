@@ -144,8 +144,11 @@ class GridBot:
                 if trades:
                     self.log(f"Fiyat kaynağı: {base}{path}")
                     return float(trades[-1]["price"])
+                else:
+                    self.log(f"Boş cevap ({base}{path}): {str(data)[:200]}")
             except Exception as e:
                 last_error = e
+                self.log(f"HATA ({base}{path}): {e}")
                 continue
         raise RuntimeError(
             f"Güncel fiyat hiçbir uç noktadan alınamadı (son hata: {last_error})."

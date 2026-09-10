@@ -10,10 +10,6 @@ smartForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   smartFormError.textContent = "";
   const investment = document.getElementById("smart-investment").value;
-  if (!investment) {
-    smartFormError.textContent = "Toplam yatırım miktarını girin.";
-    return;
-  }
   smartStartBtn.disabled = true;
   try {
     const res = await fetch("/api/smart/start", {

@@ -11,8 +11,6 @@ Bu API, global Binance'tan tamamen ayrıdır:
 Grid mantığı, global Binance versiyonuyla birebir aynı:
 fiyatın altına BUY emirleri açılır, dolunca bir üst seviyeye SELL
 emri konur, o da dolunca kâr kaydedilip tekrar BUY açılır.
-Emirler artık REST sorgusu (polling) yerine WebSocket üzerinden
-anlık olarak izlenir, bu sayede rate-limit riski en aza iner.
 """
 
 import os
@@ -137,7 +135,52 @@ class GridBot:
             if f["filterType"] == "LOT_SIZE":
                 self.step_size = float(f["stepSize"])
 
+    def _get_price_via_ws_ticker(self, timeout=8):
+        """Ticker stream'inden tek bir fiyat okuması alır (REST trades boş dönerse)."""
+        result = {}
+        done = threading.Event()
+        stream_symbol = self.symbol_flat.lower()
+
+        bases = [
+            f"wss://stream-cloud.binance.tr/ws/{stream_symbol}@miniTicker",
+            f"wss://stream-tr.2meta.app/ws/{stream_symbol}@miniTicker",
+        ]
+
+        for url in bases:
+            result.clear()
+            done.clear()
+
+            def on_message(ws, message, _url=url):
+                try:
+                    data = json.loads(message)
+                    price = data.get("c") or data.get("close")
+                    if price is not None:
+                        result["price"] = float(price)
+                        self.log(f"Fiyat kaynağı (WS ticker): {_url}")
+                except Exception:
+                    pass
+                done.set()
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
+            def on_error(ws, error):
+                done.set()
+
+            ws_app = websocket.WebSocketApp(url, on_message=on_message, on_error=on_error)
+            t = threading.Thread(target=ws_app.run_forever, daemon=True)
+            t.start()
+            done.wait(timeout)
+            if "price" in result:
+                return result["price"]
+        return None
+
     def _get_current_price(self) -> float:
+        ws_price = self._get_price_via_ws_ticker()
+        if ws_price:
+            return ws_price
+
         attempts = [
             (TRADE_BASE, "/open/v1/market/trades", {"symbol": self.symbol}),
             (TRADE_BASE, "/open/v1/market/trades", {"symbol": self.symbol_flat}),

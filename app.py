@@ -284,7 +284,7 @@ def get_account_balances(client, log_fn=None) -> dict:
         data = client.signed_request("GET", "/open/v1/account/spot", {})
         if log_fn:
             log_fn(f"Bakiye cevabı (ham): {str(data)[:300]}")
-        balances = data.get("data", {}).get("balances", [])
+        balances = data.get("data", {}).get("accountAssets", [])
         return {b["asset"]: float(b.get("free", 0)) for b in balances}
     except Exception as e:
         if log_fn:

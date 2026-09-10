@@ -1,3 +1,68 @@
+const smartForm = document.getElementById("smart-form");
+const smartStartBtn = document.getElementById("smart-start-btn");
+const smartStopBtn = document.getElementById("smart-stop-btn");
+const smartFormError = document.getElementById("smart-form-error");
+const smartPnlValue = document.getElementById("smart-pnl-value");
+const smartPositions = document.getElementById("smart-positions");
+const smartLog = document.getElementById("smart-log");
+
+smartForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  smartFormError.textContent = "";
+  const investment = document.getElementById("smart-investment").value;
+  if (!investment) {
+    smartFormError.textContent = "Toplam yatırım miktarını girin.";
+    return;
+  }
+  smartStartBtn.disabled = true;
+  try {
+    const res = await fetch("/api/smart/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ investment }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      smartFormError.textContent = data.error || "Başlatılamadı.";
+      smartStartBtn.disabled = false;
+    }
+  } catch (err) {
+    smartFormError.textContent = "Sunucuya bağlanılamadı.";
+    smartStartBtn.disabled = false;
+  }
+});
+
+smartStopBtn.addEventListener("click", async () => {
+  smartStopBtn.disabled = true;
+  await fetch("/api/smart/stop", { method: "POST" });
+});
+
+function renderSmartStatus(s) {
+  smartStartBtn.disabled = s.active;
+  smartStopBtn.disabled = !s.active;
+  smartPnlValue.textContent = (s.realized_profit ?? 0).toFixed(4);
+
+  if (!s.positions || s.positions.length === 0) {
+    smartPositions.innerHTML = s.active
+      ? '<p class="empty-hint">Pozisyon yok, uygun sinyal aranıyor...</p>'
+      : '<p class="empty-hint">Otonom bot çalışmıyor.</p>';
+  } else {
+    smartPositions.innerHTML = s.positions
+      .map(
+        (p) => `<div class="bot-card">
+          <div class="bot-card-header">
+            <span class="status-dot running"></span>
+            <span class="bot-symbol">${p.symbol}</span>
+            <span class="bot-meta" style="margin-left:auto;">giriş: ${p.entry_price} · ${p.time}</span>
+          </div>
+        </div>`
+      )
+      .join("");
+  }
+  smartLog.textContent = (s.logs || []).join("\n");
+  smartLog.scrollTop = smartLog.scrollHeight;
+}
+
 const autoForm = document.getElementById("auto-form");
 const autoStartBtn = document.getElementById("auto-start-btn");
 const autoFormError = document.getElementById("auto-form-error");
@@ -138,6 +203,14 @@ async function poll() {
     renderBots(bots);
   } catch (err) {
     // sunucu henüz ayakta değilse sessizce geç
+  }
+
+  try {
+    const res2 = await fetch("/api/smart/status");
+    const smartData = await res2.json();
+    renderSmartStatus(smartData);
+  } catch (err) {
+    // sessizce geç
   }
 }
 

@@ -77,6 +77,12 @@ def round_step(value: float, step: float) -> float:
     )
 
 
+def format_amount(value: float, step: float) -> str:
+    """Binance'ın kabul etmediği bilimsel gösterimi (örn. 5.3e-05) önler."""
+    decimals = max(0, int(round(-math.log10(step)))) if step and step < 1 else 0
+    return f"{value:.{decimals}f}"
+
+
 class BinanceTRClient:
     """Binance TR API için imzalı/imzasız istek yardımcı sınıfı."""
 
@@ -196,6 +202,7 @@ class GridBot:
                     "http_proxy_host": PROXY["host"],
                     "http_proxy_port": PROXY["port"],
                     "http_proxy_auth": (PROXY["user"], PROXY["password"]),
+                    "proxy_type": "http",
                 }
             t = threading.Thread(target=ws_app.run_forever, kwargs=run_kwargs, daemon=True)
             t.start()
@@ -297,6 +304,8 @@ class GridBot:
     def _place_order(self, level_idx, side):
         price = self._round_price(self.levels[level_idx])
         qty = self.qty_per_grid
+        price_str = format_amount(price, self.tick_size)
+        qty_str = format_amount(qty, self.step_size)
         side_code = 0 if side == "BUY" else 1
         try:
             resp = self.client.signed_request(
@@ -306,8 +315,8 @@ class GridBot:
                     "symbol": self.symbol,
                     "side": side_code,
                     "type": 1,  # LIMIT
-                    "quantity": qty,
-                    "price": price,
+                    "quantity": qty_str,
+                    "price": price_str,
                     "timeInForce": 1,  # GTC
                 },
             )
@@ -384,6 +393,7 @@ class GridBot:
                 "http_proxy_host": PROXY["host"],
                 "http_proxy_port": PROXY["port"],
                 "http_proxy_auth": (PROXY["user"], PROXY["password"]),
+                "proxy_type": "http",
             })
         self.ws.run_forever(**run_kwargs)
 

@@ -137,7 +137,10 @@ class GridBot:
         for base, path, params in attempts:
             try:
                 data = self.client.public_request(base, path, {**params, "limit": 1})
-                trades = data if isinstance(data, list) else data.get("data", [])
+                raw = data if isinstance(data, list) else data.get("data", [])
+                if isinstance(raw, dict):
+                    raw = raw.get("list", [])
+                trades = raw
                 if trades:
                     self.log(f"Fiyat kaynağı: {base}{path}")
                     return float(trades[-1]["price"])

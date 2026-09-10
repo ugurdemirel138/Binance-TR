@@ -20,7 +20,7 @@ import hmac
 import hashlib
 import json
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlencode, urlparse
 
 import requests
@@ -297,6 +297,13 @@ class SmartTrader:
         self.logs = []
         self.client = None
 
+        # --- basit uyarlama (adaptasyon) durumu ---
+        self.trade_history = []          # [{"symbol", "profit", "time"}]
+        self.symbol_strikes = {}         # symbol -> art arda zarar sayısı
+        self.blacklist = {}              # symbol -> kara listeden çıkış zamanı
+        self.activity_threshold = ACTIVITY_THRESHOLD_PCT
+        self.rsi_band = [30, 70]
+
     def log(self, message: str):
         ts = datetime.now().strftime("%H:%M:%S")
         with self.lock:
@@ -312,6 +319,11 @@ class SmartTrader:
         self.positions = {}
         self.realized_profit = 0.0
         self.logs = []
+        self.trade_history = []
+        self.symbol_strikes = {}
+        self.blacklist = {}
+        self.activity_threshold = ACTIVITY_THRESHOLD_PCT
+        self.rsi_band = [30, 70]
         self.active = True
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
@@ -344,6 +356,7 @@ class SmartTrader:
         while self.active:
             try:
                 self._scan_and_trade()
+                self._adapt()
             except Exception as e:
                 self.log(f"HATA (tarama döngüsü): {e}")
             for _ in range(SCAN_INTERVAL_SECONDS):
@@ -377,8 +390,10 @@ class SmartTrader:
                             "price": info["price"], "change_pct": change_pct})
 
         scored.sort(key=lambda x: x["change_pct"], reverse=True)
-        candidates = [s for s in scored if s["change_pct"] >= ACTIVITY_THRESHOLD_PCT][:MAX_SMART_POSITIONS * 2]
-        self.log(f"{len(candidates)} hareketli coin bulundu (eşik: %{ACTIVITY_THRESHOLD_PCT}).")
+        now = datetime.now()
+        scored = [s for s in scored if self.blacklist.get(s["symbol"], now) <= now]
+        candidates = [s for s in scored if s["change_pct"] >= self.activity_threshold][:MAX_SMART_POSITIONS * 2]
+        self.log(f"{len(candidates)} hareketli coin bulundu (eşik: %{self.activity_threshold:.2f}).")
 
         chosen_symbols = {c["symbol"] for c in candidates[:MAX_SMART_POSITIONS]}
 
@@ -405,14 +420,15 @@ class SmartTrader:
             return False
         ema9, ema21 = compute_ema(closes, 9), compute_ema(closes, 21)
         rsi = compute_rsi(closes, 14)
-        return bool(ema9 and ema21 and rsi and ema9 > ema21 and 30 < rsi < 70)
+        low, high = self.rsi_band
+        return bool(ema9 and ema21 and rsi and ema9 > ema21 and low < rsi < high)
 
     def _bearish(self, closes):
         if len(closes) < 21:
             return False
         ema9, ema21 = compute_ema(closes, 9), compute_ema(closes, 21)
         rsi = compute_rsi(closes, 14)
-        return bool((ema9 and ema21 and ema9 < ema21) or (rsi and rsi > 75))
+        return bool((ema9 and ema21 and ema9 < ema21) or (rsi and rsi > self.rsi_band[1] + 5))
 
     def _buy_position(self, symbol, symbol_type, price):
         filters = self._get_symbol_filters(symbol)
@@ -454,14 +470,45 @@ class SmartTrader:
                 sell_price = info["price"]
             profit = (sell_price - pos["entry_price"]) * pos["qty"]
             self.realized_profit += profit
+            self.trade_history.append({
+                "symbol": symbol, "profit": profit,
+                "time": datetime.now().strftime("%H:%M:%S"),
+            })
+            if profit < 0:
+                self.symbol_strikes[symbol] = self.symbol_strikes.get(symbol, 0) + 1
+                if self.symbol_strikes[symbol] >= 2:
+                    self.blacklist[symbol] = datetime.now() + timedelta(hours=6)
+                    self.log(f"{symbol} art arda zarar etti, 6 saat kara listeye alındı.")
+            else:
+                self.symbol_strikes[symbol] = 0
             self.log(f"SAT: {symbol} @ ~{sell_price} ({reason}), kâr/zarar: {round(profit, 2)}")
         except Exception as e:
             self.log(f"HATA (satım {symbol}): {e}")
         finally:
             del self.positions[symbol]
 
+    def _adapt(self):
+        """Son işlemlere bakıp eşikleri hafifçe ayarlar (basit, şeffaf kural)."""
+        recent = self.trade_history[-10:]
+        if len(recent) < 5:
+            return
+        win_rate = sum(1 for t in recent if t["profit"] > 0) / len(recent)
+        if win_rate < 0.4:
+            self.activity_threshold = min(5.0, self.activity_threshold + 0.5)
+            self.rsi_band = [35, 65]
+            self.log(f"Kazanma oranı düşük (%{win_rate*100:.0f}), eşikler sıkılaştırıldı.")
+        elif win_rate > 0.6:
+            self.activity_threshold = max(1.0, self.activity_threshold - 0.25)
+            self.rsi_band = [30, 70]
+            self.log(f"Kazanma oranı iyi (%{win_rate*100:.0f}), eşikler hafifçe gevşetildi.")
+
     def status(self):
         with self.lock:
+            recent = self.trade_history[-10:]
+            win_rate = (
+                round(100 * sum(1 for t in recent if t["profit"] > 0) / len(recent))
+                if recent else None
+            )
             return {
                 "active": self.active,
                 "total_investment": self.total_investment,
@@ -471,6 +518,9 @@ class SmartTrader:
                     for s, p in self.positions.items()
                 ],
                 "logs": self.logs[-100:],
+                "win_rate": win_rate,
+                "activity_threshold": round(self.activity_threshold, 2),
+                "blacklist": [s for s, until in self.blacklist.items() if until > datetime.now()],
             }
 
 

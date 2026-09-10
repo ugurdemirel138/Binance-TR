@@ -1,18 +1,49 @@
-const form = document.getElementById("config-form");
+const autoForm = document.getElementById("auto-form");
+const autoStartBtn = document.getElementById("auto-start-btn");
+const autoFormError = document.getElementById("auto-form-error");
+
+const configForm = document.getElementById("config-form");
 const startBtn = document.getElementById("start-btn");
-const stopBtn = document.getElementById("stop-btn");
 const formError = document.getElementById("form-error");
 
-const statusDot = document.getElementById("status-dot");
-const statusText = document.getElementById("status-text");
-const symbolTag = document.getElementById("symbol-tag");
+const stopAllBtn = document.getElementById("stop-all-btn");
 const pnlValue = document.getElementById("pnl-value");
-const gridLadder = document.getElementById("grid-ladder");
-const ordersBody = document.getElementById("orders-body");
-const tradesBody = document.getElementById("trades-body");
-const logOutput = document.getElementById("log-output");
+const botsList = document.getElementById("bots-list");
 
-form.addEventListener("submit", async (e) => {
+autoForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  autoFormError.textContent = "";
+
+  const investment = document.getElementById("auto-investment").value;
+  const count = document.getElementById("auto-count").value;
+
+  if (!investment) {
+    autoFormError.textContent = "Toplam yatırım miktarını girin.";
+    return;
+  }
+
+  autoStartBtn.disabled = true;
+  try {
+    const res = await fetch("/api/auto_start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ investment, count }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      autoFormError.textContent = data.error || "Otomatik başlatma başarısız.";
+    } else if (data.errors && data.errors.length) {
+      autoFormError.textContent =
+        `Başlatıldı: ${data.started.join(", ")}. Atlanan: ${data.errors.join(" | ")}`;
+    }
+  } catch (err) {
+    autoFormError.textContent = "Sunucuya bağlanılamadı.";
+  } finally {
+    autoStartBtn.disabled = false;
+  }
+});
+
+configForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   formError.textContent = "";
 
@@ -43,90 +74,68 @@ form.addEventListener("submit", async (e) => {
     const data = await res.json();
     if (!data.ok) {
       formError.textContent = data.error || "Bot başlatılamadı.";
-      startBtn.disabled = false;
-    } else {
-      stopBtn.disabled = false;
     }
   } catch (err) {
     formError.textContent = "Sunucuya bağlanılamadı.";
+  } finally {
     startBtn.disabled = false;
   }
 });
 
-stopBtn.addEventListener("click", async () => {
-  stopBtn.disabled = true;
-  await fetch("/api/stop", { method: "POST" });
-  startBtn.disabled = false;
+stopAllBtn.addEventListener("click", async () => {
+  stopAllBtn.disabled = true;
+  await fetch("/api/stop_all", { method: "POST" });
+  stopAllBtn.disabled = false;
 });
 
-function renderLadder(levels, orders) {
-  if (!levels || levels.length === 0) {
-    gridLadder.innerHTML = '<p class="empty-hint">Bot başlatıldığında seviyeler burada görünecek.</p>';
+async function stopBot(symbol) {
+  await fetch("/api/stop", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ symbol }),
+  });
+}
+
+function renderBots(bots) {
+  if (!bots || bots.length === 0) {
+    botsList.innerHTML = '<p class="empty-hint">Henüz çalışan bot yok. Sol taraftan başlat.</p>';
     return;
   }
-  const orderByLevel = {};
-  orders.forEach((o) => (orderByLevel[o.level] = o));
 
-  gridLadder.innerHTML = levels
-    .map((price, idx) => {
-      const order = orderByLevel[idx];
-      const cls = order ? (order.side === "BUY" ? "buy" : "sell") : "";
-      const sideLabel = order ? order.side : "—";
-      return `<div class="grid-level ${cls}">
-        <span class="lvl-price">${price.toFixed(4)}</span>
-        <span class="lvl-bar"></span>
-        <span class="lvl-side">${sideLabel}</span>
+  botsList.innerHTML = bots
+    .map((b) => {
+      const openOrders = (b.orders || []).length;
+      const trades = (b.trades || []).length;
+      const logs = (b.logs || []).slice(-4).join("\n");
+      const statusLabel = b.active ? "Çalışıyor" : "Durdu";
+      return `<div class="bot-card">
+        <div class="bot-card-header">
+          <span class="status-dot ${b.active ? "running" : ""}"></span>
+          <span class="bot-symbol">${b.symbol}</span>
+          <span class="bot-profit">+${(b.total_profit ?? 0).toFixed(4)}</span>
+          <button class="bot-stop-btn" data-symbol="${b.symbol}">Durdur</button>
+        </div>
+        <div class="bot-meta">${statusLabel} · Açık emir: ${openOrders} · Tamamlanan işlem: ${trades}</div>
+        <pre class="bot-log-mini">${logs}</pre>
       </div>`;
     })
     .join("");
-}
 
-function renderOrders(orders) {
-  ordersBody.innerHTML = orders
-    .map(
-      (o) => `<tr>
-        <td>${o.level}</td>
-        <td class="side-${o.side.toLowerCase()}">${o.side}</td>
-        <td>${o.price}</td>
-        <td>${o.qty}</td>
-      </tr>`
-    )
-    .join("");
-}
-
-function renderTrades(trades) {
-  tradesBody.innerHTML = trades
-    .slice()
-    .reverse()
-    .map(
-      (t) => `<tr>
-        <td>${t.time}</td>
-        <td class="side-buy">${t.buy_price}</td>
-        <td class="side-sell">${t.sell_price}</td>
-        <td>${t.profit}</td>
-      </tr>`
-    )
-    .join("");
+  botsList.querySelectorAll(".bot-stop-btn").forEach((btn) => {
+    btn.addEventListener("click", () => stopBot(btn.dataset.symbol));
+  });
 }
 
 async function poll() {
   try {
     const res = await fetch("/api/status");
-    const s = await res.json();
+    const data = await res.json();
+    const bots = data.bots || [];
 
-    statusDot.classList.toggle("running", s.active);
-    statusText.textContent = s.active ? "Bot çalışıyor" : "Bot durdu";
-    symbolTag.textContent = s.symbol || "";
-    pnlValue.textContent = (s.total_profit ?? 0).toFixed(6);
+    const totalProfit = bots.reduce((sum, b) => sum + (b.total_profit || 0), 0);
+    pnlValue.textContent = totalProfit.toFixed(6);
 
-    startBtn.disabled = s.active;
-    stopBtn.disabled = !s.active;
-
-    renderLadder(s.levels, s.orders);
-    renderOrders(s.orders);
-    renderTrades(s.trades);
-    logOutput.textContent = (s.logs || []).join("\n");
-    logOutput.scrollTop = logOutput.scrollHeight;
+    renderBots(bots);
   } catch (err) {
     // sunucu henüz ayakta değilse sessizce geç
   }

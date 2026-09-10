@@ -23,6 +23,30 @@
 <main class="layout">
 
   <section class="panel config-panel">
+    <h2>Akıllı Otonom Mod</h2>
+    <p class="hint-text">
+      Bot, piyasayı tarar, en hareketli coin'leri kendisi bulur,
+      EMA/RSI göstergeleriyle alım-satım kararı verir. Kaç coin
+      tutacağına ve ne zaman çıkacağına kendisi karar verir.
+    </p>
+    <form id="smart-form">
+      <label>
+        Toplam yatırım (TRY)
+        <input type="number" id="smart-investment" step="any" placeholder="örn. 3000">
+      </label>
+      <div class="actions">
+        <button type="submit" id="smart-start-btn" class="btn btn-start">Otonom Başlat</button>
+        <button type="button" id="smart-stop-btn" class="btn btn-stop" disabled>Durdur</button>
+      </div>
+      <p class="form-error" id="smart-form-error"></p>
+    </form>
+    <div class="pnl-box">
+      <span class="pnl-label">Gerçekleşen kâr/zarar (otonom)</span>
+      <span class="pnl-value" id="smart-pnl-value">0.00</span>
+    </div>
+  </section>
+
+  <section class="panel config-panel">
     <h2>Otomatik Mod</h2>
     <p class="hint-text">
       Bot, hangi coin'lerde işlem yapacağını ve fiyat aralığını
@@ -84,7 +108,13 @@
   </section>
 
   <section class="panel main-panel">
-    <h2>Aktif Botlar</h2>
+    <h2>Otonom Pozisyonlar</h2>
+    <div id="smart-positions">
+      <p class="empty-hint">Otonom bot çalışmıyor.</p>
+    </div>
+    <pre class="bot-log-mini" id="smart-log" style="margin-top:10px; max-height:140px;"></pre>
+
+    <h2 style="margin-top:22px;">Aktif Botlar (Manuel/Basit Otomatik)</h2>
     <div id="bots-list">
       <p class="empty-hint">Henüz çalışan bot yok. Sol taraftan başlat.</p>
     </div>

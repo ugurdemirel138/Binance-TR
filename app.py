@@ -278,13 +278,17 @@ def fetch_try_symbol_universe(client, limit=40) -> list:
     return result[:limit]
 
 
-def get_account_balances(client) -> dict:
+def get_account_balances(client, log_fn=None) -> dict:
     """Varlık -> kullanılabilir (free) bakiye sözlüğü döner."""
     try:
         data = client.signed_request("GET", "/open/v1/account/spot", {})
+        if log_fn:
+            log_fn(f"Bakiye cevabı (ham): {str(data)[:300]}")
         balances = data.get("data", {}).get("balances", [])
         return {b["asset"]: float(b.get("free", 0)) for b in balances}
-    except Exception:
+    except Exception as e:
+        if log_fn:
+            log_fn(f"HATA (bakiye sorgusu): {e}")
         return {}
 
 
@@ -305,7 +309,7 @@ def get_symbol_step(client, symbol: str):
 
 def ensure_try_balance(client, needed_try: float, log_fn=None) -> bool:
     """TRY bakiyesi yetersizse, mevcut USDT'yi otomatik olarak TRY'ye çevirir."""
-    balances = get_account_balances(client)
+    balances = get_account_balances(client, log_fn=log_fn)
     try_balance = balances.get("TRY", 0)
     if try_balance >= needed_try:
         return True

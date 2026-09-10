@@ -112,6 +112,8 @@ def fetch_ticker_ws(symbol_flat: str, timeout: float = 8) -> dict:
                     result["price"] = float(data["c"])
                     result["high"] = float(data.get("h", data["c"]))
                     result["low"] = float(data.get("l", data["c"]))
+                    result["open"] = float(data.get("o", data["c"]))
+                    result["quote_volume"] = float(data.get("q", 0))
             except Exception:
                 pass
             done.set()
@@ -138,6 +140,341 @@ def fetch_ticker_ws(symbol_flat: str, timeout: float = 8) -> dict:
         if "price" in result:
             return result
     return {}
+
+
+def fetch_multi_ticker(symbol_flats: list, timeout: float = 12) -> dict:
+    """Birden fazla sembolün 24s verisini TEK WebSocket bağlantısından toplu çeker."""
+    result = {}
+    done = threading.Event()
+    streams = "/".join(f"{s.lower()}@miniTicker" for s in symbol_flats)
+    bases = [
+        f"wss://stream-cloud.binance.tr/stream?streams={streams}",
+        f"wss://stream-tr.2meta.app/stream?streams={streams}",
+    ]
+    target_count = len(symbol_flats)
+
+    for url in bases:
+        result.clear()
+        done.clear()
+
+        def on_message(ws, message):
+            try:
+                msg = json.loads(message)
+                d = msg.get("data", msg)
+                sym = d.get("s")
+                if sym and d.get("c") is not None:
+                    result[sym] = {
+                        "price": float(d["c"]),
+                        "open": float(d.get("o", d["c"])),
+                        "quote_volume": float(d.get("q", 0)),
+                    }
+                if len(result) >= target_count:
+                    done.set()
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        def on_error(ws, error):
+            done.set()
+
+        ws_app = websocket.WebSocketApp(url, on_message=on_message, on_error=on_error)
+        run_kwargs = {}
+        if PROXY:
+            run_kwargs = {
+                "http_proxy_host": PROXY["host"],
+                "http_proxy_port": PROXY["port"],
+                "http_proxy_auth": (PROXY["user"], PROXY["password"]),
+                "proxy_type": "http",
+            }
+        t = threading.Thread(target=ws_app.run_forever, kwargs=run_kwargs, daemon=True)
+        t.start()
+        done.wait(timeout)
+        if result:
+            return result
+    return {}
+
+
+def parse_kline_closes(raw) -> list:
+    closes = []
+    for item in raw:
+        try:
+            if isinstance(item, list) and len(item) >= 5:
+                closes.append(float(item[4]))
+            elif isinstance(item, dict):
+                c = item.get("close") or item.get("c")
+                if c is not None:
+                    closes.append(float(c))
+        except Exception:
+            continue
+    return closes
+
+
+def fetch_klines(client, symbol: str, symbol_flat: str, interval="1h", limit=50, log_fn=None) -> list:
+    attempts = [
+        (MARKET_BASE, "/api/v3/klines", {"symbol": symbol_flat, "interval": interval, "limit": limit}),
+        (TRADE_BASE, "/open/v1/market/klines", {"symbol": symbol, "interval": interval, "limit": limit}),
+        (TRADE_BASE, "/open/v1/market/klines", {"symbol": symbol_flat, "interval": interval, "limit": limit}),
+    ]
+    for base, path, params in attempts:
+        try:
+            data = client.public_request(base, path, params)
+            raw = data if isinstance(data, list) else data.get("data", [])
+            if isinstance(raw, dict):
+                raw = raw.get("list", [])
+            closes = parse_kline_closes(raw)
+            if closes:
+                return closes
+            elif log_fn:
+                log_fn(f"Kline boş ({base}{path})")
+        except Exception as e:
+            if log_fn:
+                log_fn(f"Kline hata ({base}{path}): {e}")
+            continue
+    return []
+
+
+def compute_ema(values: list, period: int):
+    if len(values) < period:
+        return None
+    k = 2 / (period + 1)
+    ema = sum(values[:period]) / period
+    for price in values[period:]:
+        ema = price * k + ema * (1 - k)
+    return ema
+
+
+def compute_rsi(values: list, period: int = 14):
+    if len(values) < period + 1:
+        return None
+    gains, losses = [], []
+    for i in range(1, period + 1):
+        change = values[i] - values[i - 1]
+        gains.append(max(change, 0))
+        losses.append(max(-change, 0))
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    for i in range(period + 1, len(values)):
+        change = values[i] - values[i - 1]
+        avg_gain = (avg_gain * (period - 1) + max(change, 0)) / period
+        avg_loss = (avg_loss * (period - 1) + max(-change, 0)) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+def fetch_try_symbol_universe(client, limit=40) -> list:
+    """Binance TR'deki tüm _TRY paritelerini (ve tiplerini) getirir."""
+    data = client.public_request(TRADE_BASE, "/open/v1/common/symbols")
+    symbols = data.get("data", {}).get("list", [])
+    result = []
+    for s in symbols:
+        sym = s.get("symbol", "")
+        if sym.endswith("_TRY"):
+            result.append((sym, s.get("type", 1)))
+    return result[:limit]
+
+
+MAX_SMART_POSITIONS = 5
+MIN_QUOTE_VOLUME_TRY = 50000
+ACTIVITY_THRESHOLD_PCT = 1.5
+SCAN_INTERVAL_SECONDS = 60  # 1 dakika
+
+
+class SmartTrader:
+    """Coin seçimini ve alım-satım kararını kendisi veren otonom mod."""
+
+    def __init__(self):
+        self.active = False
+        self.thread = None
+        self.lock = threading.Lock()
+        self.total_investment = 0.0
+        self.positions = {}
+        self.realized_profit = 0.0
+        self.logs = []
+        self.client = None
+
+    def log(self, message: str):
+        ts = datetime.now().strftime("%H:%M:%S")
+        with self.lock:
+            self.logs.append(f"[{ts}] {message}")
+            if len(self.logs) > MAX_LOG_LINES:
+                self.logs = self.logs[-MAX_LOG_LINES:]
+
+    def start(self, total_investment: float):
+        if self.active:
+            raise RuntimeError("Akıllı otonom bot zaten çalışıyor.")
+        self.client = BinanceTRClient(API_KEY, API_SECRET)
+        self.total_investment = total_investment
+        self.positions = {}
+        self.realized_profit = 0.0
+        self.logs = []
+        self.active = True
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+        self.log("Akıllı otonom bot başlatıldı.")
+
+    def stop(self):
+        if not self.active:
+            return
+        self.active = False
+        self.log("Durduruluyor, açık pozisyonlar kapatılıyor...")
+        for symbol in list(self.positions.keys()):
+            self._sell_position(symbol, reason="Bot durduruldu")
+        self.log("Akıllı otonom bot durduruldu.")
+
+    def _get_symbol_filters(self, symbol):
+        data = self.client.public_request(TRADE_BASE, "/open/v1/common/symbols")
+        symbols = data.get("data", {}).get("list", [])
+        info = next((s for s in symbols if s["symbol"] == symbol), None)
+        if not info:
+            return None
+        tick = step = 0.0
+        for f in info["filters"]:
+            if f["filterType"] == "PRICE_FILTER":
+                tick = float(f["tickSize"])
+            if f["filterType"] == "LOT_SIZE":
+                step = float(f["stepSize"])
+        return {"type": info.get("type", 1), "tick": tick, "step": step}
+
+    def _loop(self):
+        while self.active:
+            try:
+                self._scan_and_trade()
+            except Exception as e:
+                self.log(f"HATA (tarama döngüsü): {e}")
+            for _ in range(SCAN_INTERVAL_SECONDS):
+                if not self.active:
+                    break
+                time.sleep(1)
+
+    def _scan_and_trade(self):
+        self.log("Piyasa taranıyor...")
+        universe = fetch_try_symbol_universe(self.client)
+        if not universe:
+            self.log("Sembol listesi alınamadı, bu tur atlanıyor.")
+            return
+
+        symbol_flats = [s[0].replace("_", "") for s in universe]
+        ticker_data = fetch_multi_ticker(symbol_flats)
+        if not ticker_data:
+            self.log("Piyasa verisi alınamadı, bu tur atlanıyor.")
+            return
+
+        scored = []
+        for symbol, symbol_type in universe:
+            flat = symbol.replace("_", "")
+            info = ticker_data.get(flat)
+            if not info or not info.get("open"):
+                continue
+            change_pct = abs((info["price"] - info["open"]) / info["open"] * 100)
+            if info.get("quote_volume", 0) < MIN_QUOTE_VOLUME_TRY:
+                continue
+            scored.append({"symbol": symbol, "type": symbol_type,
+                            "price": info["price"], "change_pct": change_pct})
+
+        scored.sort(key=lambda x: x["change_pct"], reverse=True)
+        candidates = [s for s in scored if s["change_pct"] >= ACTIVITY_THRESHOLD_PCT][:MAX_SMART_POSITIONS * 2]
+        self.log(f"{len(candidates)} hareketli coin bulundu (eşik: %{ACTIVITY_THRESHOLD_PCT}).")
+
+        chosen_symbols = {c["symbol"] for c in candidates[:MAX_SMART_POSITIONS]}
+
+        for symbol in list(self.positions.keys()):
+            flat = symbol.replace("_", "")
+            closes = fetch_klines(self.client, symbol, flat, log_fn=self.log)
+            if symbol not in chosen_symbols or self._bearish(closes):
+                self._sell_position(symbol, reason="sinyal/aralık dışı")
+
+        slots = MAX_SMART_POSITIONS - len(self.positions)
+        for c in candidates:
+            if slots <= 0:
+                break
+            if c["symbol"] in self.positions:
+                continue
+            flat = c["symbol"].replace("_", "")
+            closes = fetch_klines(self.client, c["symbol"], flat, log_fn=self.log)
+            if self._bullish(closes):
+                self._buy_position(c["symbol"], c["type"], c["price"])
+                slots -= 1
+
+    def _bullish(self, closes):
+        if len(closes) < 21:
+            return False
+        ema9, ema21 = compute_ema(closes, 9), compute_ema(closes, 21)
+        rsi = compute_rsi(closes, 14)
+        return bool(ema9 and ema21 and rsi and ema9 > ema21 and 30 < rsi < 70)
+
+    def _bearish(self, closes):
+        if len(closes) < 21:
+            return False
+        ema9, ema21 = compute_ema(closes, 9), compute_ema(closes, 21)
+        rsi = compute_rsi(closes, 14)
+        return bool((ema9 and ema21 and ema9 < ema21) or (rsi and rsi > 75))
+
+    def _buy_position(self, symbol, symbol_type, price):
+        filters = self._get_symbol_filters(symbol)
+        if not filters:
+            self.log(f"{symbol}: filtre bilgisi alınamadı, atlandı.")
+            return
+        budget = self.total_investment / MAX_SMART_POSITIONS
+        qty = round_step(budget / price, filters["step"])
+        if qty <= 0:
+            self.log(f"{symbol}: hesaplanan miktar çok küçük, atlandı.")
+            return
+        qty_str = format_amount(qty, filters["step"])
+        try:
+            self.client.signed_request(
+                "POST", "/open/v1/orders",
+                {"symbol": symbol, "side": 0, "type": 2, "quantity": qty_str},
+            )
+            self.positions[symbol] = {
+                "qty": qty, "entry_price": price, "symbol_type": symbol_type,
+                "filters": filters, "time": datetime.now().strftime("%H:%M:%S"),
+            }
+            self.log(f"AL: {symbol} @ ~{price} (miktar {qty_str})")
+        except Exception as e:
+            self.log(f"HATA (alım {symbol}): {e}")
+
+    def _sell_position(self, symbol, reason=""):
+        pos = self.positions.get(symbol)
+        if not pos:
+            return
+        qty_str = format_amount(pos["qty"], pos["filters"]["step"])
+        try:
+            self.client.signed_request(
+                "POST", "/open/v1/orders",
+                {"symbol": symbol, "side": 1, "type": 2, "quantity": qty_str},
+            )
+            sell_price = pos["entry_price"]
+            info = fetch_ticker_ws(symbol.replace("_", ""), timeout=4)
+            if info.get("price"):
+                sell_price = info["price"]
+            profit = (sell_price - pos["entry_price"]) * pos["qty"]
+            self.realized_profit += profit
+            self.log(f"SAT: {symbol} @ ~{sell_price} ({reason}), kâr/zarar: {round(profit, 2)}")
+        except Exception as e:
+            self.log(f"HATA (satım {symbol}): {e}")
+        finally:
+            del self.positions[symbol]
+
+    def status(self):
+        with self.lock:
+            return {
+                "active": self.active,
+                "total_investment": self.total_investment,
+                "realized_profit": round(self.realized_profit, 4),
+                "positions": [
+                    {"symbol": s, "qty": p["qty"], "entry_price": p["entry_price"], "time": p["time"]}
+                    for s, p in self.positions.items()
+                ],
+                "logs": self.logs[-100:],
+            }
+
+
+smart_trader = SmartTrader()
 
 
 class BinanceTRClient:
@@ -630,6 +967,27 @@ def api_status():
     with bots_lock:
         items = list(bots.items())
     return jsonify({"bots": [{"symbol": s, **b.status()} for s, b in items]})
+
+
+@app.route("/api/smart/start", methods=["POST"])
+def api_smart_start():
+    data = request.get_json(force=True)
+    try:
+        smart_trader.start(float(data["investment"]))
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/smart/stop", methods=["POST"])
+def api_smart_stop():
+    smart_trader.stop()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/smart/status")
+def api_smart_status():
+    return jsonify(smart_trader.status())
 
 
 if __name__ == "__main__":

@@ -128,19 +128,25 @@ class GridBot:
                 self.step_size = float(f["stepSize"])
 
     def _get_current_price(self) -> float:
-        if self.symbol_type == 1:
-            data = self.client.public_request(
-                MARKET_BASE, "/api/v3/trades", {"symbol": self.symbol_flat, "limit": 1}
-            )
-            trades = data if isinstance(data, list) else data.get("data", [])
-        else:
-            data = self.client.public_request(
-                TRADE_BASE, "/open/v1/market/trades", {"symbol": self.symbol, "limit": 1}
-            )
-            trades = data if isinstance(data, list) else data.get("data", [])
-        if not trades:
-            raise RuntimeError("Güncel fiyat alınamadı (bu sembol için işlem verisi yok).")
-        return float(trades[-1]["price"])
+        attempts = [
+            (TRADE_BASE, "/open/v1/market/trades", {"symbol": self.symbol}),
+            (TRADE_BASE, "/open/v1/market/trades", {"symbol": self.symbol_flat}),
+            (MARKET_BASE, "/api/v3/trades", {"symbol": self.symbol_flat}),
+        ]
+        last_error = None
+        for base, path, params in attempts:
+            try:
+                data = self.client.public_request(base, path, {**params, "limit": 1})
+                trades = data if isinstance(data, list) else data.get("data", [])
+                if trades:
+                    self.log(f"Fiyat kaynağı: {base}{path}")
+                    return float(trades[-1]["price"])
+            except Exception as e:
+                last_error = e
+                continue
+        raise RuntimeError(
+            f"Güncel fiyat hiçbir uç noktadan alınamadı (son hata: {last_error})."
+        )
 
     def _round_price(self, price: float) -> float:
         return round_step(price, self.tick_size)

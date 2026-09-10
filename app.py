@@ -278,6 +278,64 @@ def fetch_try_symbol_universe(client, limit=40) -> list:
     return result[:limit]
 
 
+def get_account_balances(client) -> dict:
+    """Varlık -> kullanılabilir (free) bakiye sözlüğü döner."""
+    try:
+        data = client.signed_request("GET", "/open/v1/account/spot", {})
+        balances = data.get("data", {}).get("balances", [])
+        return {b["asset"]: float(b.get("free", 0)) for b in balances}
+    except Exception:
+        return {}
+
+
+def get_symbol_step(client, symbol: str):
+    try:
+        data = client.public_request(TRADE_BASE, "/open/v1/common/symbols")
+        symbols = data.get("data", {}).get("list", [])
+        info = next((s for s in symbols if s["symbol"] == symbol), None)
+        if not info:
+            return None
+        for f in info["filters"]:
+            if f["filterType"] == "LOT_SIZE":
+                return float(f["stepSize"])
+    except Exception:
+        return None
+    return None
+
+
+def ensure_try_balance(client, needed_try: float, log_fn=None) -> bool:
+    """TRY bakiyesi yetersizse, mevcut USDT'yi otomatik olarak TRY'ye çevirir."""
+    balances = get_account_balances(client)
+    try_balance = balances.get("TRY", 0)
+    if try_balance >= needed_try:
+        return True
+
+    usdt_balance = balances.get("USDT", 0)
+    if usdt_balance <= 0:
+        if log_fn:
+            log_fn(f"TRY bakiyesi yetersiz ({try_balance}) ve çevrilecek USDT bulunamadı.")
+        return False
+
+    if log_fn:
+        log_fn(f"TRY bakiyesi yetersiz ({try_balance}). {usdt_balance} USDT, TRY'ye çevriliyor...")
+
+    step = get_symbol_step(client, "USDT_TRY") or 0.01
+    qty_str = format_amount(round_step(usdt_balance, step), step)
+    try:
+        client.signed_request(
+            "POST", "/open/v1/orders",
+            {"symbol": "USDT_TRY", "side": 1, "type": 2, "quantity": qty_str},
+        )
+        time.sleep(3)
+        if log_fn:
+            log_fn("USDT → TRY dönüşümü gönderildi.")
+        return True
+    except Exception as e:
+        if log_fn:
+            log_fn(f"HATA (USDT→TRY dönüşümü): {e}")
+        return False
+
+
 MAX_SMART_POSITIONS = 5
 MIN_QUOTE_VOLUME_TRY = 50000
 ACTIVITY_THRESHOLD_PCT = 1.5
@@ -324,6 +382,13 @@ class SmartTrader:
         self.blacklist = {}
         self.activity_threshold = ACTIVITY_THRESHOLD_PCT
         self.rsi_band = [30, 70]
+
+        if not ensure_try_balance(self.client, total_investment, log_fn=self.log):
+            raise RuntimeError(
+                "TRY bakiyesi yetersiz ve otomatik dönüşüm başarısız oldu. "
+                "Hesabında TRY veya USDT olduğundan emin ol."
+            )
+
         self.active = True
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
@@ -399,7 +464,7 @@ class SmartTrader:
 
         for symbol in list(self.positions.keys()):
             flat = symbol.replace("_", "")
-            closes = fetch_klines(self.client, symbol, flat, log_fn=self.log)
+            closes = fetch_klines(self.client, symbol, flat, interval="5m", log_fn=self.log)
             if symbol not in chosen_symbols or self._bearish(closes):
                 self._sell_position(symbol, reason="sinyal/aralık dışı")
 
@@ -410,7 +475,7 @@ class SmartTrader:
             if c["symbol"] in self.positions:
                 continue
             flat = c["symbol"].replace("_", "")
-            closes = fetch_klines(self.client, c["symbol"], flat, log_fn=self.log)
+            closes = fetch_klines(self.client, c["symbol"], flat, interval="5m", log_fn=self.log)
             if self._bullish(closes):
                 self._buy_position(c["symbol"], c["type"], c["price"])
                 slots -= 1
@@ -963,6 +1028,13 @@ def api_auto_start():
 
     chosen = candidates[:count]
     per_coin_investment = total_investment / len(chosen)
+
+    check_client = BinanceTRClient(API_KEY, API_SECRET)
+    if not ensure_try_balance(check_client, total_investment):
+        return jsonify({
+            "ok": False,
+            "error": "TRY bakiyesi yetersiz ve otomatik dönüşüm başarısız oldu.",
+        }), 400
 
     started, errors = [], []
     for symbol in chosen:

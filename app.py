@@ -96,6 +96,7 @@ class GridBot:
 
         self.symbol = None          # BTC_USDT (trading çağrıları için)
         self.symbol_flat = None     # BTCUSDT (piyasa verisi için)
+        self.symbol_type = 1
         self.levels = []
         self.qty_per_grid = 0.0
         self.tick_size = 0.0
@@ -119,6 +120,7 @@ class GridBot:
         info = next((s for s in symbols if s["symbol"] == self.symbol), None)
         if info is None:
             raise ValueError(f"Sembol bulunamadı: {self.symbol}")
+        self.symbol_type = info.get("type", 1)
         for f in info["filters"]:
             if f["filterType"] == "PRICE_FILTER":
                 self.tick_size = float(f["tickSize"])
@@ -126,12 +128,19 @@ class GridBot:
                 self.step_size = float(f["stepSize"])
 
     def _get_current_price(self) -> float:
-        data = self.client.public_request(
-            MARKET_BASE, "/api/v3/trades", {"symbol": self.symbol_flat, "limit": 1}
-        )
-        if not data:
-            raise RuntimeError("Güncel fiyat alınamadı.")
-        return float(data[-1]["price"])
+        if self.symbol_type == 1:
+            data = self.client.public_request(
+                MARKET_BASE, "/api/v3/trades", {"symbol": self.symbol_flat, "limit": 1}
+            )
+            trades = data if isinstance(data, list) else data.get("data", [])
+        else:
+            data = self.client.public_request(
+                TRADE_BASE, "/open/v1/market/trades", {"symbol": self.symbol, "limit": 1}
+            )
+            trades = data if isinstance(data, list) else data.get("data", [])
+        if not trades:
+            raise RuntimeError("Güncel fiyat alınamadı (bu sembol için işlem verisi yok).")
+        return float(trades[-1]["price"])
 
     def _round_price(self, price: float) -> float:
         return round_step(price, self.tick_size)

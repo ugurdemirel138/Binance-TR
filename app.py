@@ -373,11 +373,10 @@ class SmartTrader:
             if len(self.logs) > MAX_LOG_LINES:
                 self.logs = self.logs[-MAX_LOG_LINES:]
 
-    def start(self, total_investment: float):
+    def start(self, total_investment: float = None):
         if self.active:
             raise RuntimeError("Akıllı otonom bot zaten çalışıyor.")
         self.client = BinanceTRClient(API_KEY, API_SECRET)
-        self.total_investment = total_investment
         self.positions = {}
         self.realized_profit = 0.0
         self.logs = []
@@ -387,16 +386,87 @@ class SmartTrader:
         self.activity_threshold = ACTIVITY_THRESHOLD_PCT
         self.rsi_band = [30, 70]
 
+        if not total_investment or total_investment <= 0:
+            total_investment = self._use_full_balance()
+            self.log(f"Yatırım miktarı belirtilmedi, tüm bakiye kullanılacak: {total_investment:.2f} TRY")
+        self.total_investment = total_investment
+
         if not ensure_try_balance(self.client, total_investment, log_fn=self.log):
             raise RuntimeError(
                 "TRY bakiyesi yetersiz ve otomatik dönüşüm başarısız oldu. "
                 "Hesabında TRY veya USDT olduğundan emin ol."
             )
 
+        self._adopt_existing_assets()
+
         self.active = True
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
         self.log("Akıllı otonom bot başlatıldı.")
+
+    def _use_full_balance(self) -> float:
+        """USDT varsa TRY'ye çevirir, sonra tüm kullanılabilir TRY bakiyesini döner."""
+        balances = get_account_balances(self.client, log_fn=self.log)
+        usdt = balances.get("USDT", 0)
+        if usdt > 0:
+            step = get_symbol_step(self.client, "USDT_TRY") or 0.01
+            qty_str = format_amount(round_step(usdt, step), step)
+            try:
+                self.client.signed_request(
+                    "POST", "/open/v1/orders",
+                    {"symbol": "USDT_TRY", "side": 1, "type": 2, "quantity": qty_str},
+                )
+                time.sleep(3)
+                self.log(f"{usdt} USDT → TRY dönüşümü gönderildi.")
+            except Exception as e:
+                self.log(f"HATA (USDT→TRY dönüşümü): {e}")
+        balances = get_account_balances(self.client)
+        try_balance = balances.get("TRY", 0)
+        return round(try_balance * 0.98, 2)  # işlem/komisyon için küçük tampon
+
+    def _adopt_existing_assets(self):
+        """Cüzdanda zaten duran (önceki çalışmalardan kalan) varlıkları yönetime alır."""
+        balances = get_account_balances(self.client)
+        if not balances:
+            return
+        skip_assets = {"TRY", "USDT"}
+        try:
+            data = self.client.public_request(TRADE_BASE, "/open/v1/common/symbols")
+            all_symbols = data.get("data", {}).get("list", [])
+        except Exception as e:
+            self.log(f"HATA (varlık taraması): {e}")
+            return
+
+        for asset, free_qty in balances.items():
+            if asset in skip_assets or free_qty <= 0:
+                continue
+            symbol = f"{asset}_TRY"
+            info = next((s for s in all_symbols if s["symbol"] == symbol), None)
+            if not info:
+                continue
+
+            tick = step = 0.0
+            for f in info["filters"]:
+                if f["filterType"] == "PRICE_FILTER":
+                    tick = float(f["tickSize"])
+                if f["filterType"] == "LOT_SIZE":
+                    step = float(f["stepSize"])
+            qty = round_step(free_qty, step)
+            if qty <= 0:
+                continue
+
+            price_info = fetch_ticker_ws(symbol.replace("_", ""), timeout=5)
+            price = price_info.get("price")
+            if not price or qty * price < 10:  # toz miktarları (10 TRY altı) atla
+                continue
+
+            self.positions[symbol] = {
+                "qty": qty, "entry_price": price,
+                "symbol_type": info.get("type", 1),
+                "filters": {"type": info.get("type", 1), "tick": tick, "step": step},
+                "time": datetime.now().strftime("%H:%M:%S"),
+            }
+            self.log(f"Cüzdanda bulundu, yönetime alındı: {symbol} (miktar {qty}, ~{price} TRY)")
 
     def stop(self):
         if not self.active:
@@ -1106,9 +1176,11 @@ def api_status():
 
 @app.route("/api/smart/start", methods=["POST"])
 def api_smart_start():
-    data = request.get_json(force=True)
+    data = request.get_json(force=True) or {}
+    raw = data.get("investment")
+    investment = float(raw) if raw not in (None, "",) else None
     try:
-        smart_trader.start(float(data["investment"]))
+        smart_trader.start(investment)
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400

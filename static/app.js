@@ -40,18 +40,16 @@ function renderSmartStatus(s) {
 
   const winRateText = s.win_rate != null ? `Kazanma oranı: %${s.win_rate} · ` : "";
   const thresholdText = s.activity_threshold != null ? `Eşik: %${s.activity_threshold}` : "";
-  const blacklistText = s.blacklist && s.blacklist.length
-    ? ` · Kara liste: ${s.blacklist.join(", ")}` : "";
 
   if (!s.positions || s.positions.length === 0) {
     smartPositions.innerHTML =
-      `<p class="bot-meta">${winRateText}${thresholdText}${blacklistText}</p>` +
+      `<p class="bot-meta">${winRateText}${thresholdText}</p>` +
       (s.active
         ? '<p class="empty-hint">Pozisyon yok, uygun sinyal aranıyor...</p>'
         : '<p class="empty-hint">Otonom bot çalışmıyor.</p>');
   } else {
     smartPositions.innerHTML =
-      `<p class="bot-meta">${winRateText}${thresholdText}${blacklistText}</p>` +
+      `<p class="bot-meta">${winRateText}${thresholdText}</p>` +
       s.positions
         .map(
           (p) => `<div class="bot-card">

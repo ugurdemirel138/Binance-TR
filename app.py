@@ -341,6 +341,8 @@ def ensure_try_balance(client, needed_try: float, log_fn=None) -> bool:
 
 
 MAX_SMART_POSITIONS = 5
+FEE_RATE = 0.001  # Binance TR spot komisyonu (yaklaşık %0.1, tek taraf)
+MIN_MOVE_SAFETY_MULTIPLIER = 3  # beklenen hareket, komisyonun en az 3 katı olmalı
 MIN_QUOTE_VOLUME_TRY = 50000
 ACTIVITY_THRESHOLD_PCT = 1.5
 SCAN_INTERVAL_SECONDS = 60  # 1 dakika
@@ -362,7 +364,6 @@ class SmartTrader:
         # --- basit uyarlama (adaptasyon) durumu ---
         self.trade_history = []          # [{"symbol", "profit", "time"}]
         self.symbol_strikes = {}         # symbol -> art arda zarar sayısı
-        self.blacklist = {}              # symbol -> kara listeden çıkış zamanı
         self.activity_threshold = ACTIVITY_THRESHOLD_PCT
         self.rsi_band = [30, 70]
 
@@ -382,7 +383,6 @@ class SmartTrader:
         self.logs = []
         self.trade_history = []
         self.symbol_strikes = {}
-        self.blacklist = {}
         self.activity_threshold = ACTIVITY_THRESHOLD_PCT
         self.rsi_band = [30, 70]
 
@@ -529,8 +529,6 @@ class SmartTrader:
                             "price": info["price"], "change_pct": change_pct})
 
         scored.sort(key=lambda x: x["change_pct"], reverse=True)
-        now = datetime.now()
-        scored = [s for s in scored if self.blacklist.get(s["symbol"], now) <= now]
         candidates = [s for s in scored if s["change_pct"] >= self.activity_threshold][:MAX_SMART_POSITIONS * 2]
         self.log(f"{len(candidates)} hareketli coin bulundu (eşik: %{self.activity_threshold:.2f}).")
 
@@ -554,8 +552,20 @@ class SmartTrader:
                 self._buy_position(c["symbol"], c["type"], c["price"])
                 slots -= 1
 
+    def _expected_move_ok(self, closes):
+        """Son mumlardaki dalga genişliği, gidiş-dönüş komisyonunu (+güvenlik payı)
+        karşılayacak kadar büyük mü kontrol eder. Değilse işlem komisyona yenilir."""
+        if len(closes) < 10:
+            return False
+        recent = closes[-10:]
+        swing_pct = (max(recent) - min(recent)) / recent[-1]
+        required = FEE_RATE * 2 * MIN_MOVE_SAFETY_MULTIPLIER
+        return swing_pct >= required
+
     def _bullish(self, closes):
         if len(closes) < 21:
+            return False
+        if not self._expected_move_ok(closes):
             return False
         ema9, ema21 = compute_ema(closes, 9), compute_ema(closes, 21)
         rsi = compute_rsi(closes, 14)
@@ -616,7 +626,9 @@ class SmartTrader:
             info = fetch_ticker_ws(symbol.replace("_", ""), timeout=4)
             if info.get("price"):
                 sell_price = info["price"]
-            profit = (sell_price - pos["entry_price"]) * qty_to_sell
+            gross_profit = (sell_price - pos["entry_price"]) * qty_to_sell
+            fee_cost = (pos["entry_price"] + sell_price) * qty_to_sell * FEE_RATE
+            profit = gross_profit - fee_cost
             self.realized_profit += profit
             self.trade_history.append({
                 "symbol": symbol, "profit": profit,
@@ -624,12 +636,13 @@ class SmartTrader:
             })
             if profit < 0:
                 self.symbol_strikes[symbol] = self.symbol_strikes.get(symbol, 0) + 1
-                if self.symbol_strikes[symbol] >= 2:
-                    self.blacklist[symbol] = datetime.now() + timedelta(hours=6)
-                    self.log(f"{symbol} art arda zarar etti, 6 saat kara listeye alındı.")
             else:
                 self.symbol_strikes[symbol] = 0
-            self.log(f"SAT: {symbol} @ ~{sell_price} ({reason}), kâr/zarar: {round(profit, 2)}")
+            self.log(
+                f"SAT: {symbol} @ ~{sell_price} ({reason}), "
+                f"brüt: {round(gross_profit, 2)}, komisyon: -{round(fee_cost, 2)}, "
+                f"net kâr/zarar: {round(profit, 2)}"
+            )
         except Exception as e:
             self.log(f"HATA (satım {symbol}): {e}")
         finally:
@@ -668,7 +681,6 @@ class SmartTrader:
                 "logs": self.logs[-100:],
                 "win_rate": win_rate,
                 "activity_threshold": round(self.activity_threshold, 2),
-                "blacklist": [s for s, until in self.blacklist.items() if until > datetime.now()],
             }
 
 
